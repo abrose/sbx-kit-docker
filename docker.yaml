@@ -1,0 +1,47 @@
+# syntax=docker/sandbox-kit:3
+schemaVersion: "3"
+displayName: Docker
+description: Docker and Compose in sbx-stack sandboxes, with Docker Hub images through a mirror on the Mac. Of use when the agent starts containers, pulls images, or a pull fails
+kind: mixin
+version: "0.1.0"
+
+args:
+  mirrorPort:
+    default: "29500"
+    pattern: '^[0-9]{4,5}$'
+    description: The loopback port of the mirror on the Mac (host/sbx-docker-mirror)
+
+capabilities:
+  - type: com.docker.sandbox/lifecycle@1
+    config:
+      startup:
+        - command: /usr/local/bin/sbx-docker-setup '${{ kit.args.mirrorPort }}'
+          user: "0"
+          description: Points dockerd at the mirror on the Mac and warns when the image disk is nearly full
+
+  - type: com.docker.sandbox/network-policy@2
+    config:
+      runtime:
+        allow:
+          - hosts:
+              - registry-1.docker.io
+              - auth.docker.io
+              - production.cloudfront.docker.com
+              - production.cloudflare.docker.com
+            methods: [GET, HEAD]
+          - hosts: ["localhost:${{ kit.args.mirrorPort }}"]
+
+  - type: com.docker.sandbox/agent-context@2
+    config:
+      content: |
+        # Docker in this sandbox
+
+        - Docker and Docker Compose run in this sandbox. Testcontainers works too.
+        - Docker Hub images come through a mirror on the Mac. When the mirror is down, pulls go to Docker Hub directly.
+        - Images of other registries need a network rule of the project. A 403 from the proxy means there is no rule:
+          report it, do not work around it.
+        - A container that downloads data at start (for example virus signatures) needs rules for its hosts too.
+        - The image disk has the size of the sbx setting `sandbox.disk.dockerVolume`. Check `df -h /var/lib/docker`
+          before you start a stack of containers and when a pull fails. `/var/log/sbx-docker.log` holds the disk
+          warning of the last start.
+        - A push to Docker Hub is blocked on purpose.
