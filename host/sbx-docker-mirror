@@ -1,0 +1,89 @@
+#!/usr/bin/env bash
+# A pull-through mirror of Docker Hub on the Mac's loopback, for the sandboxes of sbx-kit-docker.
+set -euo pipefail
+
+name=sbx-docker-mirror
+port=29500
+image=registry:3
+
+usage() {
+  echo "usage: $(basename "$0") [--name <name>] [--port <port>] up|status|down|purge" >&2
+  exit 2
+}
+
+die() {
+  echo "$*" >&2
+  exit 1
+}
+
+cmd=
+while [ $# -gt 0 ]; do
+  case $1 in
+    --name | --port)
+      [ $# -ge 2 ] || usage
+      if [ "$1" = --name ]; then name=$2; else port=$2; fi
+      shift 2
+      ;;
+    up | status | down | purge)
+      [ -z "$cmd" ] || usage
+      cmd=$1
+      shift
+      ;;
+    *) usage ;;
+  esac
+done
+[ -n "$cmd" ] || usage
+[[ $name =~ ^[a-z0-9][a-z0-9_.-]*$ ]] || usage
+[[ $port =~ ^[1-9][0-9]{3,4}$ ]] || usage
+[ "$port" -ge 1024 ] && [ "$port" -le 65535 ] || usage
+
+docker info >/dev/null 2>&1 || die "Docker does not run on this Mac"
+
+state() { docker container inspect -f '{{.State.Running}}' "$name" 2>/dev/null || echo absent; }
+bound_port() { docker port "$name" 5000/tcp 2>/dev/null | sed -n 's/^127\.0\.0\.1:\([0-9]*\)$/\1/p' | head -1; }
+cache_size() {
+  docker system df -v --format '{{json .Volumes}}' | jq -r --arg n "$name" '.[] | select(.Name == $n) | .Size'
+}
+
+up() {
+  local running
+  running=$(state)
+  if [ "$running" = true ]; then
+    local current
+    current=$(bound_port)
+    [ "$current" = "$port" ] || die "$name runs on port ${current:-unknown}; run down first"
+    echo "running $name on 127.0.0.1:$port"
+    return
+  fi
+  if [ "$running" = false ]; then docker rm "$name" >/dev/null; fi
+  if lsof -nP -iTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1; then die "port $port is in use by another process"; fi
+  docker run -d --name "$name" --restart unless-stopped -p "127.0.0.1:$port:5000" \
+    -v "$name:/var/lib/registry" -e REGISTRY_PROXY_REMOTEURL=https://registry-1.docker.io "$image" >/dev/null
+  for _ in $(seq 1 30); do
+    if curl -fsS -o /dev/null "http://127.0.0.1:$port/v2/" 2>/dev/null; then
+      echo "running $name on 127.0.0.1:$port"
+      return
+    fi
+    sleep 0.5
+  done
+  die "$name does not answer on 127.0.0.1:$port after 15s"
+}
+
+status() {
+  case $(state) in
+    true) echo "$name: running 127.0.0.1:$(bound_port), cache $(cache_size)" ;;
+    false) echo "$name: stopped" ;;
+    *) echo "$name: absent" ;;
+  esac
+}
+
+down() {
+  if [ "$(state)" != absent ]; then docker rm -f "$name" >/dev/null; fi
+}
+
+purge() {
+  down
+  if docker volume inspect "$name" >/dev/null 2>&1; then docker volume rm "$name" >/dev/null; fi
+}
+
+"$cmd"
