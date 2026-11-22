@@ -60,6 +60,10 @@ A cold pull of `postgres:16-alpine` took 14 s through the mirror, a warm one 2 s
          - command: /path/to/sbx-kit-docker/host/sbx-docker-mirror up || true
      ```
 
+     A host command has a cost: sbx then asks for approval at each create and run, and refuses without a terminal.
+     The user setting `env.rememberHostCommands true` keeps the approval until the command changes. For creates
+     with no terminal, leave the line out and start the mirror by hand.
+
 4. Allow the other registries of the project (`quay.io`, `ghcr.io`, a private registry) and the hosts that its
    containers fetch data from at start, in the project file.
 
@@ -94,6 +98,10 @@ Exit codes: 0 done, 1 failed, 2 usage. `--name` sets the name of the container a
 
 ## Limits
 
+- An invalid `/etc/docker/daemon.json` stops `dockerd` at the next start, and sbx then refuses to start the sandbox
+  (`docker daemon failed to start inside the sandbox`). No kit code runs before `dockerd`, so the kit cannot repair
+  the file. The kit itself writes the file only as valid JSON, through a temporary file. The agent context tells the
+  agent to run `dockerd --validate` after its own change. A sandbox in this state must be removed and created again.
 - Only Docker Hub images use the cache. Images of other registries pull directly in each new task.
 - A new sandbox starts with an empty image store: `sbx template save` does not keep `/var/lib/docker`. A warm pull
   of all images of a project still takes some seconds per image.

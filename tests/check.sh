@@ -85,11 +85,18 @@ check "Compose starts a service with a published port" \
 mac "the pull went through the check's mirror" \
   sh -c "curl -fsS http://127.0.0.1:$port/v2/_catalog | grep -q library/nginx"
 
-# The Claude kit's own apt refresh is blocked in every sandbox (plain HTTP); every other blocked host is a finding.
-# This runs before the push, which must be blocked.
-blocked=$(sbx policy log "$name" --json --limit 0 |
-  jq -r --arg since "$since" '[.blocked[]? | select(.last_seen[0:19] >= $since) | .host
-    | select(. != "deb.debian.org:80" and . != "dhi.io:80")] | unique | join(" ")')
+# The policy log, entries of this run only. dockerd reached the mirror through the kit rule: its entry proves that the
+# log of this run is not empty. The Claude kit's own apt refresh is blocked in every sandbox (plain HTTP); every other
+# blocked host is a finding. This runs before the push, which must be blocked.
+policy=$(sbx policy log "$name" --json --limit 0 2>>"$log" || true)
+if jq -e --arg since "$since" --arg host "localhost:$port" \
+  '[.allowed[]? | select(.last_seen[0:19] >= $since) | .host] | index($host) != null' <<<"$policy" >/dev/null 2>&1; then
+  pass "the policy log of this run allowed the mirror port"
+else
+  fail "the policy log of this run allowed the mirror port"
+fi
+blocked=$(jq -r --arg since "$since" '[.blocked[]? | select(.last_seen[0:19] >= $since) | .host
+  | select(. != "deb.debian.org:80" and . != "dhi.io:80")] | unique | join(" ")' <<<"$policy" 2>>"$log" || true)
 if [ -z "$blocked" ]; then
   pass "the network policy blocks nothing the kit needs"
 else
@@ -110,18 +117,26 @@ for round in 1 2 3; do
      [ "$(grep -c "unchanged daemon.json" $hook_log)" -eq '"$((unchanged + 1))"' ]'
 done
 
-check "the hook keeps another key of daemon.json" \
-  'jq ". + {\"debug\": false}" /etc/docker/daemon.json | sudo tee /etc/docker/daemon.json.new >/dev/null &&
+check "the hook rewrites only the mirror and keeps another key of daemon.json" \
+  'jq ". + {\"debug\": false, \"registry-mirrors\": [\"http://example.invalid\"]}" /etc/docker/daemon.json |
+     sudo tee /etc/docker/daemon.json.new >/dev/null &&
    sudo mv /etc/docker/daemon.json.new /etc/docker/daemon.json &&
    sudo /usr/local/bin/sbx-docker-setup $port &&
    [ "$(jq .debug /etc/docker/daemon.json)" = false ] &&
-   jq -e ".\"registry-mirrors\" == [\"http://host.docker.internal:$port\"]" /etc/docker/daemon.json'
+   jq -e ".\"registry-mirrors\" == [\"http://host.docker.internal:$port\"]" /etc/docker/daemon.json &&
+   [ "$(grep -c "wrote daemon.json" $hook_log)" -eq 2 ]'
 check "an invalid daemon.json is left as is and logged" \
-  'sudo cp /etc/docker/daemon.json /tmp/daemon.json.good &&
+  'sudo cp /etc/docker/daemon.json /var/tmp/daemon.json.good &&
    echo "{" | sudo tee /etc/docker/daemon.json >/dev/null &&
    sudo /usr/local/bin/sbx-docker-setup $port &&
    [ "$(cat /etc/docker/daemon.json)" = "{" ] && grep -q "invalid daemon.json, left as is" $hook_log
-   rc=$?; sudo cp /tmp/daemon.json.good /etc/docker/daemon.json; exit $rc'
+   rc=$?; sudo cp /var/tmp/daemon.json.good /etc/docker/daemon.json; exit $rc'
+
+# An invalid daemon.json at a start stops dockerd, and sbx then refuses to start the sandbox at all. The agent
+# context names the guard: dockerd --validate before a stop.
+check "dockerd --validate accepts the hook's daemon.json and refuses an invalid one" \
+  'sudo dockerd --validate --config-file /etc/docker/daemon.json && echo "{" >/var/tmp/bad.json &&
+   ! sudo dockerd --validate --config-file /var/tmp/bad.json'
 check "the hook warns when the disk is fuller than the limit" \
   'sudo /usr/local/bin/sbx-docker-setup $port 0 && grep -q "warn /var/lib/docker" $hook_log'
 

@@ -45,3 +45,6 @@ capabilities:
           before you start a stack of containers and when a pull fails. `/var/log/sbx-docker.log` holds the disk
           warning of the last start.
         - A push to Docker Hub is blocked on purpose.
+        - Do not change `/etc/docker/daemon.json` unless the task needs it. An invalid file stops dockerd at the next
+          start, and then the sandbox does not start at all. After a change, run
+          `sudo dockerd --validate --config-file /etc/docker/daemon.json`, and keep the key `registry-mirrors` as it is.
